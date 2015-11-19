@@ -1,3 +1,4 @@
+apt-get install d-itg
 cp D-ITG/D-ITG-2.8.1-r1023-src.zip ~
 cd ~
 unzip D-ITG-2.8.1-r1023-src.zip
