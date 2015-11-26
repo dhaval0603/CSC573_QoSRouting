@@ -1,0 +1,6 @@
+Command to receive traffic
+ITGRecv
+
+Command to send traffic in 3 different flows(VOIP,ftp and telnet)
+ITGSend script_file -l sender_log_file -x recv_log_file
+
