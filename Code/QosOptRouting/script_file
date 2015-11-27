@@ -1,3 +1,3 @@
--a 10.0.0.1 -rp 10001 -b 5  VoIP -x G.711.2 -h RTP -VAD
--a 10.0.0.1 -rp 10002 -b 15 Telnet
--a 10.0.0.1 -rp 10003 -b 25 DNS
+-a 10.0.0.1 -rp 10001 VoIP -x G.711.2 -h RTP -VAD
+-a 10.0.0.1 -rp 10002 Telnet
+-a 10.0.0.1 -rp 10003 DNS
