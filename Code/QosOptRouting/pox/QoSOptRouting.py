@@ -328,9 +328,6 @@ def handle_switch_desc(event):
 
 def handle_QueueStatsReceived (event):
   print "########## Handle Queue Stats Recd started ##########"
-    #Handles port stats event.
-  #self.stats = event.stats
-#  print "Switch",dpidToStr(event.dpid)
   print "Event For DPID - " + str(event.dpid)
   print "Stats For DPID - " + str(event.stats)
   for qStats in event.stats:
@@ -340,6 +337,7 @@ def handle_QueueStatsReceived (event):
       ports[dpidToStr(event.dpid)][qStats.port_no][prevtx] = qStats.tx_errors
       ports[dpidToStr(event.dpid)][qStats.port_no][tx] = qSt
   print "########## Handle Queue Stats Recd ended ##########"
+  
 ################################Done Understanding######################################################################
 
 def find_latency_sw_to_sw(dpid):
@@ -371,7 +369,28 @@ def find_latency_c_to_sw(dpid):
   pkt = ofp_stats_request(body = mbody)
   pkt.type = OFPST_QUEUE ####Queue Stats
   core.openflow.sendToDPID(dpid,pkt)
-
+  get_port_stats(dpid)
+  
+def get_port_stats(dpid):
+  print "#### Port Stat request Starts  OFPST_PORT ####"
+  print str(dpid)
+  for connection in core.openflow._connections.values():
+      connection.send(of.ofp_stats_request(body=of.ofp_flow_stats_request()))
+      connection.send(of.ofp_stats_request(body=of.ofp_port_stats_request()))
+  print "#### Port Stat request End###"
+  
+def _handle_flowstats_received (event):
+    print "--------------------------------------------Flow Stat for - " + str(event.dpid)
+    for fStat in event.stats:
+        print fStat.packet_count
+    
+def _handle_portstats_received (event):
+    print "--------------------------------------------Port Stat for - " + str(event.dpid)
+    for pStat in event.stats:
+        print pStat.port_no
+        print pStat.rx_errors 
+        print pStat.tx_errors 
+        
 ######################################################################################################
 
 def find_latency():
@@ -913,8 +932,10 @@ def launch ():
   def start_launch ():
     core.registerNew(l2_multi)
     core.openflow.addListenerByName("SwitchDescReceived", handle_switch_desc)
-    core.openflow.addListenerByName("QueueStatsReceived", handle_QueueStatsReceived)
-    print "Qos Based Routing using OpenFlow"
+    #core.openflow.addListenerByName("QueueStatsReceived", handle_QueueStatsReceived)
+    core.openflow.addListenerByName("FlowStatsReceived",  _handle_flowstats_received)
+    core.openflow.addListenerByName("PortStatsReceived",    _handle_portstats_received)
+    print "Qos Based Optimal Routing using OpenFlow"
     log.debug("Latency monitor running")
     GetTopologyParams()
 
