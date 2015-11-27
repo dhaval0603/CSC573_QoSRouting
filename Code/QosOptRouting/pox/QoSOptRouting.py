@@ -152,7 +152,8 @@ class Switch (EventMixin):
 
     loc = (self, event.port)  # Place we saw this ethaddr
     oldloc = mac_map.get(packet.src)  # Place we last saw this ethaddr
-
+    #print "We got old loc from somewhere" 
+    #print oldloc
     ################################################################ Handle LLDP Type ################################################################
 
     if packet.effective_ethertype == packet.LLDP_TYPE:
@@ -167,7 +168,7 @@ class Switch (EventMixin):
       if arppack.opcode == arp.REQUEST:
         print arppack  
         print "loc - " + str(loc)
-        mac_map[packet.src] = loc  # Learn position for ethaddr
+        mac_map[packet.src] = loc  # Learn position for ethaddr (host port eth address[dp id ,port])
         print "MAC MAP - " + str(mac_map)
         print "Learned "+ str(packet.src)+" at "+   str(loc[0])+"."+ str(loc[1])
         for switch in dpids:
@@ -883,23 +884,23 @@ def GetTopologyParams():
   timeout = min(max(PATH_SETUP_TIME, 5) * 2, 15)
   Timer(timeout, WaitingPath.expire_waiting_paths, recurring=True)
   
-  Timer(10, find_HostPorts, recurring=True)
+  Timer(10, sw_HostPorts, recurring=True)
   
-def find_HostPorts ():  ####for ARP requests. Has dpid as key and ports as values.
+def sw_HostPorts ():  ####for ARP requests. Has dpid as key and ports as values.(Function can be relocated)
   # print ports
   print "##########Find Host Ports Started##########"
   create_adjacency()
   for dpid in dpids:
     host_ports[dpid] = []
-    for allp in ports[dpidToStr(dpid)].keys():
-      if allp == 65534:
+    for p in ports[dpidToStr(dpid)].keys():
+      if p == 65534:
         continue
       flag = False
-      for corep in switch_adjacency[dpid].keys():
-        if allp is corep:
+      for switchp in switch_adjacency[dpid].keys():
+        if p is switchp:
           flag = True
       if flag is False:
-        host_ports[dpid].append(allp)
+        host_ports[dpid].append(p)
     if swdebug:
       print "Host port for", dpidToStr(dpid), " = ", host_ports[dpid] 
   print "##########Find Host Ports Ended##########"  
