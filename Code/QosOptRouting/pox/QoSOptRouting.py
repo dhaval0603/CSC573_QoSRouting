@@ -277,7 +277,7 @@ class Switch (EventMixin):
 	self.install_path(dest[0], dest[1], match, event, tos)
      
   def disconnect (self):
-    global switch_adjacency
+    global switch_neighbourhood
     if self.connection is not None:
       del_dpid = self.connection.dpid
       del ports[dpidToStr(del_dpid)]
@@ -285,9 +285,9 @@ class Switch (EventMixin):
       del dpid_ts[del_dpid]
       del dpid_latency[del_dpid]
       del dpid_stats[del_dpid]
-     # for k in switch_adjacency:
-      switch_adjacency = {}
-      create_adjacency()
+     # for k in switch_neighbourhood:
+      switch_neighbourhood = {}
+      create_neighbourhood_matrix()
       log.debug("Disconnect %s" % (self.connection,))
       self.connection.removeListeners(self._listeners)
       self.connection = None
@@ -351,24 +351,20 @@ def find_latency_sw_to_sw(dpid):
       packet.data = create_lat_pkt(dpid, key, ports[dpidToStr(dpid)][key][4])
       core.openflow.sendToDPID(dpid, packet)
   
-def _handle_flowstats_received (event):
-    print "--------------------------------------------Flow Stat for - " + str(event.dpid)
-    for fStat in event.stats:
-        print fStat.packet_count
-    
 def _handle_portstats_received (event):
     print "--------------------------------------------Port Stat for - " + str(event.dpid)
     for pStat in event.stats:
         if pStat.port_no in ports[dpidToStr(event.dpid)]:
+          print pStat.tx_errors
           qSt = pStat.tx_errors - ports[dpidToStr(event.dpid)][pStat.port_no][prevtx]
           ports[dpidToStr(event.dpid)][pStat.port_no][prevtx] = pStat.tx_errors
           ports[dpidToStr(event.dpid)][pStat.port_no][tx] = qSt
-          print ports[dpidToStr(event.dpid)][pStat.port_no][tx]
+          #print ports[dpidToStr(event.dpid)][pStat.port_no][tx]
         
 ######################################################################################################
 
 def find_latency():
-  create_adjacency();
+  create_neighbourhood_matrix();
   if swdebug:
     print "Here are the link status"
     print ports
@@ -379,128 +375,87 @@ def find_latency():
     
 def find_queue_drops():
     for connection in core.openflow._connections.values():
-      connection.send(of.ofp_stats_request(body=of.ofp_flow_stats_request()))
       connection.send(of.ofp_stats_request(body=of.ofp_port_stats_request()))
       
 def find_bandwidth():
-    print "Figuring Out"
+    print ""
     
-######################################################################################################
-####################################### Cost Function ################################################
+#### Qos Index Calculator Module #####
 
-# Testing the cost function here
-#  link_costs = defaultdict(lambda:defaultdict(lambda:None))
-#  tos = 46
-#  link_costs = cf.find_cost(tos)
-#  print link_costs
+QOS_indices = {}
+switch_neighbourhood = {}
+# Declaring a dictionary for weights for different traffic to calculate QOS Index.
+QOS_weights = {}
 
+# Constants K1, K2, K3 for QOS index for diffent kinds of traffic.
+voice_traffic = [100, 0.1, 0.003]
+video_traffic = [100, 0.07, 0.007]
+critical_traffic = [100, 0.01, 0.01]
+best_effort_traffic = [100, 0, 0]
 
-"""
-Constants and variables to be used by our Cost Function
-"""
-# link_costs: [sw1][sw2] = cost
-# link_costs = defaultdict(lambda:defaultdict(lambda:None))
-link_costs = {}
-topology_costs = {}
-switch_adjacency = {}
-cf_constants = {}
-# tos_constants = []
-host_ports = {}
-# create lists for different kinds of tos values
-voice_tos = [184, 160, 128, 152, 144]
-video_tos = [120, 112]
-business_tos = [80, 88, 48, 56]
-besteffort_tos = [0]
+# Polpulating the weights dictionary
+QOS_weights['voice'] = voice_traffic
+QOS_weights['video'] = video_traffic
+QOS_weights['critical'] = critical_traffic
+QOS_weights['best_effort'] = best_effort_traffic
 
-"""
-Constants declaration end
-"""
-####################################### Functions for Cost Function ###################################
-def get_cf_consts():
-  voice = [100, 0.1, 0.003]
-  video = [100, 0.07, 0.007]
-  business = [100, 0.01, 0.01]
-  besteffort = [100, 0, 0]
-  cf_constants['voice'] = voice
-  cf_constants['video'] = video
-  cf_constants['business'] = business
-  cf_constants['besteffort'] = besteffort
-    
-def get_tos_constants(tos_constants, category):
-  if tos in voice_tos:
-    tos_constants = cf_constants['voice']
-    category = voice_tos
-  elif tos in video_tos:
-    tos_constants = cf_constants['video']
-    category = video_tos
-  elif tos in business_tos:
-    tos_constants = cf_constants['business']
-    category = business_tos
-  else:
-    tos_constants = cf_constants['besteffort']
-    category = besteffort_tos
-  if swdebug:
-    print "K1, K2 and K3 for this tos = ", tos_constants
-  return tos_constants, category
+# TOS values for different kinds of traffic.
+tos_voice = [184, 160, 128, 152, 144]
+tos_video = [120, 112]
+tos_critical = [80, 88, 48, 56]
+tos_best_effort = [0]
+host_ports = {}  
 
-def create_adjacency():
-  # switch_adjacency = {}
+def create_neighbourhood_matrix():
+  # switch_neighbourhood = {}
   print "##########Create Adjacency Started##########"
   for dpid in dpids:  ####For every switch, create empty adjacency
-    switch_adjacency[dpid] = {}
+    switch_neighbourhood[dpid] = {}
   for l in core.openflow_discovery.adjacency:
     # print "Value of L is - " + str(l)  
-    switch_adjacency[l.dpid1][l.port1] = l.dpid2
+    switch_neighbourhood[l.dpid1][l.port1] = l.dpid2
   if swdebug:
     print "Adjacency of the Topology"
-    print switch_adjacency
-  print "##########Create Adjacency Ended##########"
+    print switch_neighbourhood
+  print "##########Create Adjacency Ended##########"  
+    
 
-def find_cost(category):
+def calc_qos_index(traffic_type):
   print "##########Find Cost Started##########"
   if swdebug:
-    print "Received ToS = ", category
-  create_adjacency()
-  get_cf_consts()
-  tos_constants = cf_constants[category]
-  # tos_constants,category = get_tos_constants(tos, tos_constants, category)
+    print "Received ToS IN CALCULATE PATH = ", traffic_type
+  create_neighbourhood_matrix()
+  tos_constants = QOS_weights[traffic_type]
   if swdebug:
     print "Initialized constants. Finding cost now"
-  switch_dict = {}
-  link_costs[category] = {}
-  # Iterate through all the switches and find the cost to its neighboring switch. Ignore port 65534
+  sw_latency_map = {}
+  QOS_indices[traffic_type] = {}
+
   for switch in dpids:
-    link_costs[switch] = {}
+    QOS_indices[switch] = {}
     switchStr = dpidToStr(switch)
-    # Get this switch latency map
-    switch_dict = ports[switchStr]
-    # Iterate through all the ports of this switch. Ignore port 65534
+    sw_latency_map = ports[switchStr]
     port_list = []
     neighbors_dict = {}
-    for port in switch_adjacency[switch]:
-      port_list = switch_dict[port]
-      dest_switch = switch_adjacency[switch][port]
+    for port in switch_neighbourhood[switch]:
+      port_list = sw_latency_map[port]
+      dest_switch = switch_neighbourhood[switch][port]
 
-      # Get the values of BW, latency, Rx and Tx
       l = port_list[latency]
       b = port_list[bw]
       t = port_list[tx]
 
-      # Just a "bad" implementation of cost function based on rough assumption
       n = 0
-      if category is not "besteffort":
+      if traffic_type is not "best_effort":
         n = 1
       cost = tos_constants[0] / b + n * (tos_constants[1] * l + tos_constants[2] * t)
-
-      # Store the calculated cost value in the dictionary
-      # link_costs[switch][dest_switch] = cost
       neighbors_dict[dest_switch] = cost
-    link_costs[category][switch] = neighbors_dict
-  return link_costs[category]
-  print "##########Find Cost Started##########"
-################################################# End of Cost Function ###############################
+    QOS_indices[traffic_type][switch] = neighbors_dict
+  return QOS_indices[traffic_type]
+  print "##########Find Cost Ended##########"
 
-######################################################################################################
+##### Qos Index Calculator Module ####
+
 ####################################### Floyd Warshall ###############################################
 
 log = core.getLogger()
@@ -531,25 +486,26 @@ FLOW_HARD_TIMEOUT = 0
 PATH_SETUP_TIME = 4
 
 
-def _calc_paths (tos):
+def _calculate_route (tos):
   """
   Essentially Floyd-Warshall algorithm
   """
-  # Get the category of tos
-  category = None
-  if tos in video_tos:
-    category = "video"
-  elif tos in voice_tos:
-    category = "voice"
-  elif tos in business_tos:
-    category = "business"
+  print "===============================================TOS is ==========================" + str(tos)
+  # Get the traffic_type of tos
+  traffic_type = None
+  if tos in tos_video:
+    traffic_type = "video"
+  elif tos in tos_voice:
+    traffic_type = "voice"
+  elif tos in tos_critical:
+    traffic_type = "critical"
   else:
-    category = "besteffort"
+    traffic_type = "best_effort"
   if swdebug:
     print "***************************************************************************"
     print "***************************************************************************"
     print "Finding costs for this tos value"
-  costs = find_cost(category)
+  costs = calc_qos_index(traffic_type)
   if swdebug:
     print costs
     print "Now running Floyd Warshall"
@@ -598,8 +554,8 @@ def _get_raw_path (src, dst, tos):
   """
   Get a raw path (just a list of nodes to traverse)
   """
-  if len(path_map) == 0: _calc_paths(tos) 
-  # _calc_paths(tos)
+  if len(path_map) == 0: _calculate_route(tos) 
+  # _calculate_route(tos)
   if src is dst:
     # We're here!
     return []
@@ -633,7 +589,7 @@ def _get_path (src, dst, first_port, final_port, tos):
   """
   Gets a cooked path -- a list of (node,in_port,out_port)
   """
-  _calc_paths(tos)
+  _calculate_route(tos)
   # Start with a raw path...
   if src == dst:
     path = [src]
@@ -879,7 +835,7 @@ def GetTopologyParams():
   Timer(10, find_queue_drops, recurring=True)
   print "##########Find Queue Drop Timer Ended##########"
   
-  Timer(10, find_bandwidth, recurring=True)
+  #Timer(10, find_bandwidth, recurring=True)
   
   timeout = min(max(PATH_SETUP_TIME, 5) * 2, 15)
   Timer(timeout, WaitingPath.expire_waiting_paths, recurring=True)
@@ -889,14 +845,14 @@ def GetTopologyParams():
 def sw_HostPorts ():  ####for ARP requests. Has dpid as key and ports as values.(Function can be relocated)
   # print ports
   print "##########Find Host Ports Started##########"
-  create_adjacency()
+  create_neighbourhood_matrix()
   for dpid in dpids:
     host_ports[dpid] = []
     for p in ports[dpidToStr(dpid)].keys():
       if p == 65534:
         continue
       flag = False
-      for switchp in switch_adjacency[dpid].keys():
+      for switchp in switch_neighbourhood[dpid].keys():
         if p is switchp:
           flag = True
       if flag is False:
@@ -911,7 +867,6 @@ def launch ():
   def start_launch ():
     core.registerNew(l2_multi)
     core.openflow.addListenerByName("SwitchDescReceived", handle_switch_desc)
-    core.openflow.addListenerByName("FlowStatsReceived", _handle_flowstats_received)
     core.openflow.addListenerByName("PortStatsReceived", _handle_portstats_received)
     print "Qos Based Optimal Routing using OpenFlow"
     log.debug("Latency monitor running")
