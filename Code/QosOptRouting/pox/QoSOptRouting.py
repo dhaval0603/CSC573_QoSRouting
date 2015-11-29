@@ -33,7 +33,7 @@ time_init = int(time.time())
 first = 1
 
 # flag for debug prints
-swdebug = 1
+swdebug = 0
 """
 ports = {'dpid':{port_no:[latency, bandwidth, rx_drops, tx_drops, mac-address]}}
 
@@ -195,7 +195,6 @@ class Switch (EventMixin):
     ################################################################# Handle LAT Type ################################################################
 
     if packet.effective_ethertype == LAT_TYPE:  ####Get type from deeper header.
-      print "######## LATENCY Packet Received ##############"  
       """
       Handle incoming latency packets
       """
@@ -204,15 +203,17 @@ class Switch (EventMixin):
       [swdpdest, swdpsrc, port_mac, prevtime] = packet.payload.split(',')
       prevtime = float(prevtime)
       currtime = time.time()
-      print "Packet Source" + str(swdpsrc)
-      print "Packet Destination" + str(swdpdest)
-      print "PrevTime = ", prevtime, "    CurrTime = ", currtime
+      if swdebug:
+         print "######## LATENCY Packet Received ##############"
+         print "Packet Source" + str(swdpsrc)
+         print "Packet Destination" + str(swdpdest)
+         print "PrevTime = ", prevtime, "    CurrTime = ", currtime
       dest_dpid = dpidToStr(event.dpid)
       if dest_dpid == swdpdest:
         # Latency packet travels = Controller - switchSrc - switchDest - Controller
         # Hence Latency = Total Time - (Controller-switch link latencies denoted by dpid_latency) 
         latency = round((((currtime - prevtime) * 1000) - dpid_latency[strToDPID(swdpsrc)] - dpid_latency[event.dpid]), 4)
-        print "Latency = " + str(latency)
+       # 
         swd = ports[swdpsrc]
         for k in swd:
           if swd[k][4] == port_mac:
@@ -220,7 +221,9 @@ class Switch (EventMixin):
         if latency >= 0:
           if k in ports[swdpsrc]:
             ports[swdpsrc][k][0] = latency
-      print "######## LATENCY Packet Sent ##############"      
+        if swdebug:
+            print "Latency = " + str(latency)    
+            print "######## LATENCY Packet Sent ##############"      
       return
     ##################################################################################################################################################
 
@@ -352,14 +355,14 @@ def find_latency_sw_to_sw(dpid):
       core.openflow.sendToDPID(dpid, packet)
   
 def _handle_portstats_received (event):
-    print "--------------------------------------------Port Stat for - " + str(event.dpid)
     for pStat in event.stats:
         if pStat.port_no in ports[dpidToStr(event.dpid)]:
-          print pStat.tx_errors
-          qSt = pStat.tx_errors - ports[dpidToStr(event.dpid)][pStat.port_no][prevtx]
-          ports[dpidToStr(event.dpid)][pStat.port_no][prevtx] = pStat.tx_errors
+          qSt = pStat.tx_dropped - ports[dpidToStr(event.dpid)][pStat.port_no][prevtx]
+          ports[dpidToStr(event.dpid)][pStat.port_no][prevtx] = pStat.tx_dropped
           ports[dpidToStr(event.dpid)][pStat.port_no][tx] = qSt
-          #print ports[dpidToStr(event.dpid)][pStat.port_no][tx]
+          if swdebug:
+              print "DPID-Port ", event.dpid, " - ", pStat.port_no
+              print "TX Packets dropped in this interval ", ports[dpidToStr(event.dpid)][pStat.port_no][tx] 
         
 ######################################################################################################
 
@@ -377,9 +380,6 @@ def find_queue_drops():
     for connection in core.openflow._connections.values():
       connection.send(of.ofp_stats_request(body=of.ofp_port_stats_request()))
       
-def find_bandwidth():
-    print ""
-    
 #### Qos Index Calculator Module #####
 
 QOS_indices = {}
@@ -408,20 +408,19 @@ host_ports = {}
 
 def create_neighbourhood_matrix():
   # switch_neighbourhood = {}
-  print "##########Create Adjacency Started##########"
+  #print "##########Create Adjacency Started##########"
   for dpid in dpids:  ####For every switch, create empty adjacency
     switch_neighbourhood[dpid] = {}
   for l in core.openflow_discovery.adjacency:
     # print "Value of L is - " + str(l)  
     switch_neighbourhood[l.dpid1][l.port1] = l.dpid2
   if swdebug:
-    print "Adjacency of the Topology"
-    print switch_neighbourhood
-  print "##########Create Adjacency Ended##########"  
+    print "Adjacency of the Topology", switch_neighbourhood
+  #print "##########Create Adjacency Ended##########"  
     
 
 def calc_qos_index(traffic_type):
-  print "##########Find Cost Started##########"
+  #print "##########Find Cost Started##########"
   if swdebug:
     print "Received ToS IN CALCULATE PATH = ", traffic_type
   create_neighbourhood_matrix()
@@ -452,7 +451,7 @@ def calc_qos_index(traffic_type):
       neighbors_dict[dest_switch] = cost
     QOS_indices[traffic_type][switch] = neighbors_dict
   return QOS_indices[traffic_type]
-  print "##########Find Cost Ended##########"
+  #print "##########Find Cost Ended##########"
 
 ##### Qos Index Calculator Module ####
 
@@ -770,7 +769,7 @@ class l2_multi (EventMixin):
 ######################################################################################################
 
   def _handle_openflow_ConnectionUp (self, event):
-    print "##########Connection Up Event Started##########"
+    #print "##########Connection Up Event Started##########"
     sw = switches.get(event.dpid)
     if swdebug:
       print "DPID for", event.dpid, " = ", dpidToStr(event.dpid)
@@ -809,7 +808,7 @@ class l2_multi (EventMixin):
     msg.hard_timeout = 0
     msg.actions.append(of.ofp_action_output(port=of.OFPP_CONTROLLER))
     connection.send(msg)
-    print "##########Connection Up Event Ended##########"
+    #print "##########Connection Up Event Ended##########"
 ######################################################################################################
 
   def _handle_openflow_BarrierIn (self, event):
@@ -827,13 +826,13 @@ class l2_multi (EventMixin):
 
 def GetTopologyParams():
   ########Start 3 timers. TO_FIND_LATENCY, WAITING_PATH, FIND_PORTS_ON_SWITCH_WHERE_HOSTS_ARE_PRESENT
-  print "##########Find Latency Timer (Recurring) Started##########"
+  #print "##########Find Latency Timer (Recurring) Started##########"
   Timer(10, find_latency, recurring=True)
-  print "##########Find Latency Timer Ended##########"
+  #print "##########Find Latency Timer Ended##########"
   
-  print "##########Find Queue Drop Timer (Recurring) Started##########"
+  #print "##########Find Queue Drop Timer (Recurring) Started##########"
   Timer(10, find_queue_drops, recurring=True)
-  print "##########Find Queue Drop Timer Ended##########"
+  #print "##########Find Queue Drop Timer Ended##########"
   
   #Timer(10, find_bandwidth, recurring=True)
   
@@ -844,7 +843,7 @@ def GetTopologyParams():
   
 def sw_HostPorts ():  ####for ARP requests. Has dpid as key and ports as values.(Function can be relocated)
   # print ports
-  print "##########Find Host Ports Started##########"
+  #print "##########Find Host Ports Started##########"
   create_neighbourhood_matrix()
   for dpid in dpids:
     host_ports[dpid] = []
@@ -859,7 +858,7 @@ def sw_HostPorts ():  ####for ARP requests. Has dpid as key and ports as values.
         host_ports[dpid].append(p)
     if swdebug:
       print "Host port for", dpidToStr(dpid), " = ", host_ports[dpid] 
-  print "##########Find Host Ports Ended##########"  
+  #print "##########Find Host Ports Ended##########"  
 
 def launch ():
   from pox.openflow.discovery import launch
