@@ -1,8 +1,3 @@
-"""
-Start and run proto-x on OpenFlow Switches.
-
-"""
-
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
 from pox.lib.util import dpid_to_str, dpidToStr, strToDPID
@@ -20,6 +15,7 @@ from pox.openflow.discovery import Discovery
 log = core.getLogger()
 dpids = []
 ports = {}
+prevtxbytes = {}
 LAT_TYPE = 0x07c3
 dpid_ts = {}
 dpid_latency = {}
@@ -27,8 +23,9 @@ dpid_stats = {}
 latency = 0
 bw = 1
 tx = 2
-prevtx = 3
+prevtxdropped = 3
 mac = 4
+port_stat_timeout = 20
 time_init = int(time.time())
 first = 1
 
@@ -117,6 +114,8 @@ class Switch (EventMixin):
 
     log.debug("Installing path for %s -> %s %04x (%i hops)",
         match.dl_src, match.dl_dst, match.dl_type, len(p))
+    
+    print "Installing path for %s -> %s %04x (%i hops)", match.dl_src, match.dl_dst, match.dl_type, len(p)
 
     # We have a path -- install it
     self._install_path(p, match, event.ofp)
@@ -163,13 +162,13 @@ class Switch (EventMixin):
     ##################################################################################################################################################
     ################################################################ Handle ARP Type ################################################################
     if packet.type == ethernet.ARP_TYPE:
-      print  "-----------------------ARP REQUEST RECEIVED-----------"
       arppack = packet.find('arp')
       if arppack.opcode == arp.REQUEST:
+        print  "-----------------------ARP REQUEST RECEIVED-----------"
         print arppack  
         print "loc - " + str(loc)
         mac_map[packet.src] = loc  # Learn position for ethaddr (host port eth address[dp id ,port])
-        print "MAC MAP - " + str(mac_map)
+        #print "MAC MAP - " + str(mac_map)
         print "Learned "+ str(packet.src)+" at "+   str(loc[0])+"."+ str(loc[1])
         for switch in dpids:
           if switch is self.dpid:
@@ -182,6 +181,7 @@ class Switch (EventMixin):
           core.openflow.sendToDPID(switch, of.ofp_packet_out(data=packet.pack(), action=action_out))
         return
       if arppack.opcode == arp.REPLY:
+        print  "-----------------------ARP REPLY RECEIVED-----------"
         mac_map[packet.src] = loc
         loc_dst = mac_map[packet.dst]  # Learn position for ethaddr
         if swdebug:
@@ -201,6 +201,7 @@ class Switch (EventMixin):
       # Latency packet is going from SWDSrc to SWDDest from Port. Left at time T
       port = packet.src
       [swdpdest, swdpsrc, port_mac, prevtime] = packet.payload.split(',')
+      #[swdpdest, swdpsrc, port_mac, prevtime,unwanted] = packet.payload.split(',')
       prevtime = float(prevtime)
       currtime = time.time()
       if swdebug:
@@ -213,7 +214,7 @@ class Switch (EventMixin):
         # Latency packet travels = Controller - switchSrc - switchDest - Controller
         # Hence Latency = Total Time - (Controller-switch link latencies denoted by dpid_latency) 
         latency = round((((currtime - prevtime) * 1000) - dpid_latency[strToDPID(swdpsrc)] - dpid_latency[event.dpid]), 4)
-       # 
+        latency = abs(latency)
         swd = ports[swdpsrc]
         for k in swd:
           if swd[k][4] == port_mac:
@@ -284,6 +285,7 @@ class Switch (EventMixin):
     if self.connection is not None:
       del_dpid = self.connection.dpid
       del ports[dpidToStr(del_dpid)]
+      del prevtxbytes[dpidToStr(del_dpid)]
       del dpids[dpids.index(del_dpid)]
       del dpid_ts[del_dpid]
       del dpid_latency[del_dpid]
@@ -332,7 +334,6 @@ def create_lat_pkt(dpid, port, port_mac):
   latPacket.src = port_mac
   for x in core.openflow_discovery.adjacency:
       if ((x.dpid1 == dpid) and (x.port1 == port)):
-        # print "Sending for",l
         latPacket.dst = pkt.ETHERNET.NDP_MULTICAST  # need to decide
         latPacket.payload = dpidToStr(x.dpid2) + ',' + dpidToStr(x.dpid1) + ',' + port_mac + ',' + str(time.time())  ####as per paper
         return latPacket.pack()
@@ -357,25 +358,36 @@ def find_latency_sw_to_sw(dpid):
 def _handle_portstats_received (event):
     for pStat in event.stats:
         if pStat.port_no in ports[dpidToStr(event.dpid)]:
-          qSt = pStat.tx_dropped - ports[dpidToStr(event.dpid)][pStat.port_no][prevtx]
-          ports[dpidToStr(event.dpid)][pStat.port_no][prevtx] = pStat.tx_dropped
-          ports[dpidToStr(event.dpid)][pStat.port_no][tx] = qSt
-          if swdebug:
-              print "DPID-Port ", event.dpid, " - ", pStat.port_no
-              print "TX Packets dropped in this interval ", ports[dpidToStr(event.dpid)][pStat.port_no][tx] 
-        
+          calculate_txdrops(event.dpid,pStat)
+          calculate_bandwidth_util(event.dpid,pStat)
+          
+          #print "TX Drops in this interval for Switch - " +str(event.dpid) + " at Port - " + str(pStat.port_no) + " = " + str(pStat.tx_dropped)
 ######################################################################################################
+
+def calculate_txdrops(dpid,pStat):
+    qSt = pStat.tx_dropped - ports[dpidToStr(dpid)][pStat.port_no][prevtxdropped]
+    ports[dpidToStr(dpid)][pStat.port_no][prevtxdropped] = pStat.tx_dropped
+    ports[dpidToStr(dpid)][pStat.port_no][tx] = qSt
+
+def calculate_bandwidth_util(dpid,pStat):
+    qSt = pStat.tx_bytes - prevtxbytes[dpidToStr(dpid)][pStat.port_no]
+    prevtxbytes[dpidToStr(dpid)][pStat.port_no] = pStat.tx_bytes
+    
+    #Calculate the current bandwidth being utilised at the ports in Kbps 
+    bw_util = (qSt * 8) / (port_stat_timeout * 1000)
+    ports[dpidToStr(dpid)][pStat.port_no][bw] = bw_util
 
 def find_latency():
   create_neighbourhood_matrix();
-  if swdebug:
+  if swdebug==0:
     print "Here are the link status"
     print ports
+    print prevtxbytes
   for dpid in dpids:
     find_latency_c_to_sw(dpid)
   for dpid in dpids:
     find_latency_sw_to_sw(dpid)
-    
+
 def find_queue_drops():
     for connection in core.openflow._connections.values():
       connection.send(of.ofp_stats_request(body=of.ofp_port_stats_request()))
@@ -407,16 +419,11 @@ tos_best_effort = [0]
 host_ports = {}  
 
 def create_neighbourhood_matrix():
-  # switch_neighbourhood = {}
-  #print "##########Create Adjacency Started##########"
   for dpid in dpids:  ####For every switch, create empty adjacency
     switch_neighbourhood[dpid] = {}
   for l in core.openflow_discovery.adjacency:
-    # print "Value of L is - " + str(l)  
     switch_neighbourhood[l.dpid1][l.port1] = l.dpid2
-  if swdebug:
-    print "Adjacency of the Topology", switch_neighbourhood
-  #print "##########Create Adjacency Ended##########"  
+  print "Adjacency of the Topology", str(switch_neighbourhood)
     
 
 def calc_qos_index(traffic_type):
@@ -447,7 +454,7 @@ def calc_qos_index(traffic_type):
       n = 0
       if traffic_type is not "best_effort":
         n = 1
-      cost = tos_constants[0] / b + n * (tos_constants[1] * l + tos_constants[2] * t)
+      cost = (tos_constants[0] * b) + n * ((tos_constants[1] * l) + (tos_constants[2] * t))
       neighbors_dict[dest_switch] = cost
     QOS_indices[traffic_type][switch] = neighbors_dict
   return QOS_indices[traffic_type]
@@ -542,9 +549,7 @@ def _calculate_route (tos):
               path_map[i][j] = (ikj_dist, k)
               
   if swdebug:
-    print "End of Floyd Warshall"
-    print "***************************************************************************"
-    print "***************************************************************************"
+    print "----End of Floyd Warshall--------"
   # dump()
 
 ######################################################################################################
@@ -727,7 +732,7 @@ class l2_multi (EventMixin):
             # Fixed -- new link chosen to connect these
             break
       # Update "Ports" and remove entries for this port
-      if swdebug:
+      if swdebug==0:
         print "Link removed", l
       for switch in ports:
         for port in ports[switch]:
@@ -735,6 +740,7 @@ class l2_multi (EventMixin):
             if swdebug:
               print "Port removed = ", port
             del ports[switch][port]
+            del prevtxbytes[switch][port]
             break
 
       if swdebug:
@@ -769,7 +775,6 @@ class l2_multi (EventMixin):
 ######################################################################################################
 
   def _handle_openflow_ConnectionUp (self, event):
-    #print "##########Connection Up Event Started##########"
     sw = switches.get(event.dpid)
     if swdebug:
       print "DPID for", event.dpid, " = ", dpidToStr(event.dpid)
@@ -784,6 +789,7 @@ class l2_multi (EventMixin):
     
     dpids.append(event.dpid)
     ports[dpidToStr(event.dpid)] = {}
+    prevtxbytes[dpidToStr(event.dpid)] = {}
     if swdebug:
       print "Add ports to link status DB"
     dpid_ts[event.dpid] = 0.000
@@ -792,13 +798,12 @@ class l2_multi (EventMixin):
     for p in event.ofp.ports:
       port = [0.0, 100, 0, 0, str(p.hw_addr)]
       ports[dpidToStr(event.dpid)][p.port_no] = port
-    print "Ports dictionary - " + str(ports)
+      prevtxbytes[dpidToStr(event.dpid)][p.port_no] = 0
 
     """
     Tell all switches to forward latency packets to controller
     """
-    if swdebug:
-      print "Connected to switch", dpidToStr(event.dpid)
+    print "Connected to switch", dpidToStr(event.dpid)
     connection = event.connection
     match = of.ofp_match(dl_type=LAT_TYPE, dl_dst=pkt.ETHERNET.NDP_MULTICAST)
     msg = of.ofp_flow_mod()
@@ -808,33 +813,22 @@ class l2_multi (EventMixin):
     msg.hard_timeout = 0
     msg.actions.append(of.ofp_action_output(port=of.OFPP_CONTROLLER))
     connection.send(msg)
-    #print "##########Connection Up Event Ended##########"
+
 ######################################################################################################
 
   def _handle_openflow_BarrierIn (self, event):
     wp = waiting_paths.pop((event.dpid, event.xid), None)
     if not wp:
-      # log.info("No waiting packet %s,%s", event.dpid, event.xid)
       return
-    # log.debug("Notify waiting packet %s,%s", event.dpid, event.xid)
     wp.notify(event)
 
-######################################################################################################
-# Timer(10, find_latency, recurring = True)
-######################################################################################################
 ###################################### Launch Function ###############################################
 
 def GetTopologyParams():
-  ########Start 3 timers. TO_FIND_LATENCY, WAITING_PATH, FIND_PORTS_ON_SWITCH_WHERE_HOSTS_ARE_PRESENT
-  #print "##########Find Latency Timer (Recurring) Started##########"
+  ########Start 3 timers. TO_FIND_LATENCY, QUEUE Drops, WAITING_PATH, FIND_PORTS_ON_SWITCH_WHERE_HOSTS_ARE_PRESENT
   Timer(10, find_latency, recurring=True)
-  #print "##########Find Latency Timer Ended##########"
   
-  #print "##########Find Queue Drop Timer (Recurring) Started##########"
-  Timer(10, find_queue_drops, recurring=True)
-  #print "##########Find Queue Drop Timer Ended##########"
-  
-  #Timer(10, find_bandwidth, recurring=True)
+  Timer(port_stat_timeout, find_queue_drops, recurring=True)
   
   timeout = min(max(PATH_SETUP_TIME, 5) * 2, 15)
   Timer(timeout, WaitingPath.expire_waiting_paths, recurring=True)
@@ -842,8 +836,6 @@ def GetTopologyParams():
   Timer(10, sw_HostPorts, recurring=True)
   
 def sw_HostPorts ():  ####for ARP requests. Has dpid as key and ports as values.(Function can be relocated)
-  # print ports
-  #print "##########Find Host Ports Started##########"
   create_neighbourhood_matrix()
   for dpid in dpids:
     host_ports[dpid] = []
@@ -858,7 +850,6 @@ def sw_HostPorts ():  ####for ARP requests. Has dpid as key and ports as values.
         host_ports[dpid].append(p)
     if swdebug:
       print "Host port for", dpidToStr(dpid), " = ", host_ports[dpid] 
-  #print "##########Find Host Ports Ended##########"  
 
 def launch ():
   from pox.openflow.discovery import launch
@@ -868,7 +859,6 @@ def launch ():
     core.openflow.addListenerByName("SwitchDescReceived", handle_switch_desc)
     core.openflow.addListenerByName("PortStatsReceived", _handle_portstats_received)
     print "Qos Based Optimal Routing using OpenFlow"
-    log.debug("Latency monitor running")
     GetTopologyParams()
 
   core.call_when_ready(start_launch, "openflow_discovery")
