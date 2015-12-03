@@ -1,0 +1,4 @@
+ITGSend -a 10.0.0.2 -rp 10001 -b 0
+ITGSend -a 10.0.0.2 -rp 10002 -b 184
+ITGSend -a 10.0.0.2 -rp 10003 -b 120
+ITGSend -a 10.0.0.2 -rp 10004 -b 88
